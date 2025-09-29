@@ -96,4 +96,5 @@ if uploaded_file:
         mime="image/png"
     )
 else:
+
     st.info("Upload an image to get started!")
