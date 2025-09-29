@@ -1,0 +1,99 @@
+import streamlit as st
+from PIL import Image
+import numpy as np
+import cv2
+import io
+import streamlit_authenticator as stauth
+
+# --- Authentication ---
+names = ['User']
+usernames = ['user']
+passwords = ['123']  # For demo; use hashed in real projects!
+authenticator = stauth.Authenticate(
+    names, usernames, passwords, 'imgrest_cookie', 'imgrest_signature', cookie_expiry_days=1
+)
+name, auth_status, username = authenticator.login('Login', 'main')
+if not auth_status:
+    st.warning("Please login to use the app.")
+    st.stop()
+st.success(f"Welcome, {name}!")
+
+# --- App Title & Sidebar ---
+st.title("🖼️ Image Restoration App")
+option = st.sidebar.selectbox(
+    "Choose restoration type:",
+    ("Denoise", "Deblur (Simple)", "Colorize Black & White", "Original")
+)
+
+# --- Image Upload & Processing ---
+uploaded_file = st.file_uploader("Upload an image...", type=["jpg", "jpeg", "png"])
+if uploaded_file:
+    image = Image.open(uploaded_file).convert("RGB")
+    st.image(image, caption="Original Image", use_column_width=True)
+    img_array = np.array(image)
+
+    if option == "Denoise":
+        restored = cv2.fastNlMeansDenoisingColored(img_array, None, 10, 10, 7, 21)
+    elif option == "Deblur (Simple)":
+        kernel = np.ones((5,5),np.float32)/25
+        restored = cv2.filter2D(img_array,-1,kernel)
+    elif option == "Colorize Black & White":
+        # Convert to Grayscale
+        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+        # Use OpenCV's pre-trained colorization model
+        # Download models if not present (for demo: check in deployment)
+        protoFile = "colorization_deploy_v2.prototxt"
+        weightsFile = "colorization_release_v2.caffemodel"
+        ptsFile = "pts_in_hull.npy"
+
+        # Download model files if not present
+        import os, urllib.request
+        if not os.path.exists(protoFile):
+            urllib.request.urlretrieve('https://github.com/richzhang/colorization/raw/caffe/models/colorization_deploy_v2.prototxt', protoFile)
+        if not os.path.exists(weightsFile):
+            urllib.request.urlretrieve('https://github.com/richzhang/colorization/raw/caffe/models/colorization_release_v2.caffemodel', weightsFile)
+        if not os.path.exists(ptsFile):
+            urllib.request.urlretrieve('https://github.com/richzhang/colorization/raw/caffe/resources/pts_in_hull.npy', ptsFile)
+
+        net = cv2.dnn.readNetFromCaffe(protoFile, weightsFile)
+        pts = np.load(ptsFile)
+        class8 = net.getLayerId('class8_ab')
+        conv8 = net.getLayerId('conv8_313_rh')
+        net.getLayer(class8).blobs = [pts.transpose().reshape(2, 313, 1, 1)]
+        net.getLayer(conv8).blobs = [np.full([1, 313], 2.606, dtype="float32")]
+
+        img_rs = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        img_rs = cv2.cvtColor(img_rs, cv2.COLOR_BGR2GRAY)
+        img_rs = cv2.cvtColor(img_rs, cv2.COLOR_GRAY2BGR)
+        img_rs = img_rs.astype("float32") / 255.0
+        img_rs = cv2.resize(img_rs, (224, 224))
+        lab = cv2.cvtColor(img_rs, cv2.COLOR_BGR2LAB)
+        l = lab[:,:,0]
+        L = l - 50
+        net.setInput(cv2.dnn.blobFromImage(L))
+        ab = net.forward()[0,:,:,:].transpose((1,2,0))
+        ab = cv2.resize(ab, (img_rs.shape[1], img_rs.shape[0]))
+        L = l[:,:,np.newaxis]
+        lab_out = np.concatenate((L, ab), axis=2)
+        bgr_out = cv2.cvtColor(lab_out, cv2.COLOR_LAB2BGR)
+        colorized = (255 * np.clip(bgr_out, 0, 1)).astype("uint8")
+        colorized = cv2.cvtColor(colorized, cv2.COLOR_BGR2RGB)
+        restored = cv2.resize(colorized, (img_array.shape[1], img_array.shape[0]))
+    else:
+        restored = img_array
+
+    st.image(restored, caption="Restored Image", use_column_width=True)
+
+    # --- Download Button ---
+    im_pil = Image.fromarray(restored)
+    buf = io.BytesIO()
+    im_pil.save(buf, format="PNG")
+    byte_im = buf.getvalue()
+    st.download_button(
+        label="Download Restored Image",
+        data=byte_im,
+        file_name="restored.png",
+        mime="image/png"
+    )
+else:
+    st.info("Upload an image to get started!")
